@@ -758,6 +758,8 @@ function abstract_eval(@nospecialize(e), vtypes::VarTable, sv::InferenceState)
         else
             t = Any
         end
+    elseif e.head === :cfunction
+        t = Ptr{Nothing}
     elseif e.head === :static_parameter
         n = e.args[1]
         t = Any

@@ -1135,15 +1135,20 @@ static void emit_typecheck(jl_codectx_t &ctx, const jl_cgval_t &x, jl_value_t *t
     }
 }
 
-static void emit_concretecheck(jl_codectx_t &ctx, Value *typ, const std::string &msg)
+static Value *emit_isconcrete(jl_codectx_t &ctx, Value *typ)
 {
-    assert(typ->getType() == T_prjlvalue);
-    emit_typecheck(ctx, mark_julia_type(ctx, typ, true, jl_any_type), (jl_value_t*)jl_datatype_type, msg);
     Value *isconcrete;
     isconcrete = ctx.builder.CreateConstInBoundsGEP1_32(T_int8, emit_bitcast(ctx, decay_derived(typ), T_pint8), offsetof(jl_datatype_t, isconcretetype));
     isconcrete = ctx.builder.CreateLoad(isconcrete, tbaa_const);
     isconcrete = ctx.builder.CreateTrunc(isconcrete, T_int1);
-    error_unless(ctx, isconcrete, msg);
+    return isconcrete;
+}
+
+static void emit_concretecheck(jl_codectx_t &ctx, Value *typ, const std::string &msg)
+{
+    assert(typ->getType() == T_prjlvalue);
+    emit_typecheck(ctx, mark_julia_type(ctx, typ, true, jl_any_type), (jl_value_t*)jl_datatype_type, msg);
+    error_unless(ctx, emit_isconcrete(ctx, typ), msg);
 }
 
 #define CHECK_BOUNDS 1
@@ -2335,6 +2340,15 @@ static Value *emit_allocobj(jl_codectx_t &ctx, size_t static_size, Value *jt)
                                        {ptls_ptr, ConstantInt::get(T_size, static_size),
                                                maybe_decay_untracked(jt)});
     call->setAttributes(jl_alloc_obj_func->getAttributes());
+    return call;
+}
+
+// allocation for unknown object from an untracked pointer
+static Value *emit_new_bits(jl_codectx_t &ctx, Value *jt, Value *pval)
+{
+    pval = ctx.builder.CreateBitCast(pval, T_pint8);
+    auto call = ctx.builder.CreateCall(prepare_call(jl_newbits_func), { jt, pval });
+    call->setAttributes(jl_newbits_func->getAttributes());
     return call;
 }
 

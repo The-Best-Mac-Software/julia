@@ -3036,7 +3036,7 @@ f(x) = yt(x)
                                (memq (car e) '(quote top core line inert local local-def unnecessary
                                                meta inbounds boundscheck simdloop decl
                                                implicit-global global globalref outerref
-                                               const = null method call foreigncall ssavalue
+                                               const = null method call foreigncall cfunction ssavalue
                                                gc_preserve_begin gc_preserve_end))))
                          (lam:body lam))))
                (unused (map cadr (filter (lambda (x) (memq (car x) '(method =)))
@@ -3383,7 +3383,7 @@ f(x) = yt(x)
   (or (ssavalue? lhs)
       (valid-ir-argument? e)
       (and (symbol? lhs) (pair? e)
-           (memq (car e) '(new the_exception isdefined call invoke foreigncall gc_preserve_begin)))))
+           (memq (car e) '(new the_exception isdefined call invoke foreigncall cfunction gc_preserve_begin)))))
 
 (define (valid-ir-return? e)
   ;; returning lambda directly is needed for @generated
@@ -3557,7 +3557,7 @@ f(x) = yt(x)
                   ((and (pair? e1) (eq? (car e1) 'globalref)) (emit e1) #f) ;; keep globals for undefined-var checking
                   (else #f)))
           (case (car e)
-            ((call new foreigncall)
+            ((call new foreigncall cfunction)
              (let* ((args
                      (cond ((eq? (car e) 'foreigncall)
                             (for-each (lambda (a)
@@ -3575,6 +3575,8 @@ f(x) = yt(x)
                                         (list (cadr e)))
                                     (list-head (cddr e) 4)
                                     (compile-args (list-tail e 6) break-labels linearize-args)))
+                           ;; NOTE: arguments of cfunction must be left in place
+                           ((eq? (car e) 'cfunction) (cdr e))
                            ;; TODO: evaluate first argument to cglobal some other way
                            ((and (length> e 2)
                                  (or (eq? (cadr e) 'cglobal)

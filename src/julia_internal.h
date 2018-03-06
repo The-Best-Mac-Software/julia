@@ -743,6 +743,15 @@ extern void *jl_winsock_handle;
 void *jl_get_library(const char *f_lib);
 JL_DLLEXPORT void *jl_load_and_lookup(const char *f_lib, const char *f_name,
                                       void **hnd);
+JL_DLLEXPORT void *jl_get_cfunction_trampoline(
+    htable_t *cache, // weakref htable indexed by (f, vals)
+    jl_value_t *finalizer, // cleanup when this is deleted
+    void *(*init_trampoline)(void *tramp, void **nval),
+    jl_value_t *f,
+    jl_svec_t *fill,
+    jl_unionall_t *env,
+    jl_value_t **vals);
+
 // Windows only
 #define JL_EXE_LIBNAME ((const char*)1)
 #define JL_DL_LIBNAME ((const char*)2)
@@ -1012,7 +1021,9 @@ extern jl_sym_t *lambda_sym;  extern jl_sym_t *assign_sym;
 extern jl_sym_t *method_sym;  extern jl_sym_t *slot_sym;
 extern jl_sym_t *enter_sym;   extern jl_sym_t *leave_sym;
 extern jl_sym_t *exc_sym;     extern jl_sym_t *new_sym;
-extern jl_sym_t *compiler_temp_sym; extern jl_sym_t *foreigncall_sym;
+extern jl_sym_t *compiler_temp_sym;
+extern jl_sym_t *foreigncall_sym;
+extern jl_sym_t *cfunction_sym;
 extern jl_sym_t *const_sym;   extern jl_sym_t *thunk_sym;
 extern jl_sym_t *underscore_sym; extern jl_sym_t *colon_sym;
 extern jl_sym_t *abstracttype_sym; extern jl_sym_t *primtype_sym;

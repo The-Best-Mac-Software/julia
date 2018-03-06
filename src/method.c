@@ -42,6 +42,50 @@ static jl_value_t *resolve_globals(jl_value_t *expr, jl_module_t *module, jl_sve
         }
         else {
             size_t i = 0, nargs = jl_array_len(e->args);
+            if (e->head == cfunction_sym) {
+                JL_NARGS(cfunction method definition, 6, 6); // (isclosure, func, root, rt, at, cc)
+                jl_value_t *isclosure = jl_exprarg(e, 0);
+                if (isclosure != jl_true && isclosure != jl_false)
+                    jl_error("first parameter to :cfunction must be literal true or false");
+                if (isclosure == jl_false) {
+                    jl_value_t *a = jl_exprarg(e, 1);
+                    a = jl_interpret_toplevel_expr_in(module, a, NULL, NULL);
+                    jl_exprargset(e, 1, a);
+                }
+                jl_value_t *rt = jl_exprarg(e, 3);
+                jl_value_t *at = jl_exprarg(e, 4);
+                if (!jl_is_type(rt)) {
+                    JL_TRY {
+                        rt = jl_interpret_toplevel_expr_in(module, rt, NULL, sparam_vals);
+                    }
+                    JL_CATCH {
+                        if (jl_typeis(jl_exception_in_transit, jl_errorexception_type))
+                            jl_error("could not evaluate cfunction return type (it might depend on a local variable)");
+                        else
+                            jl_rethrow();
+                    }
+                    jl_exprargset(e, 3, rt);
+                }
+                if (!jl_is_svec(at)) {
+                    JL_TRY {
+                        at = jl_interpret_toplevel_expr_in(module, at, NULL, sparam_vals);
+                    }
+                    JL_CATCH {
+                        if (jl_typeis(jl_exception_in_transit, jl_errorexception_type))
+                            jl_error("could not evaluate cfunction argument type (it might depend on a local variable)");
+                        else
+                            jl_rethrow();
+                    }
+                    jl_exprargset(e, 4, at);
+                }
+                if (jl_is_svec(rt))
+                    jl_error("cfunction: missing return type");
+                JL_TYPECHK(cfunction method definition, type, rt);
+                JL_TYPECHK(cfunction method definition, simplevector, at);
+                JL_TYPECHK(cfunction method definition, quotenode, jl_exprarg(e, 5));
+                JL_TYPECHK(cfunction method definition, symbol, *(jl_value_t**)jl_exprarg(e, 5));
+                return expr;
+            }
             if (e->head == foreigncall_sym) {
                 JL_NARGSV(ccall method definition, 5); // (fptr, rt, at, cc, narg)
                 jl_value_t *rt = jl_exprarg(e, 1);
@@ -79,7 +123,7 @@ static jl_value_t *resolve_globals(jl_value_t *expr, jl_module_t *module, jl_sve
                 JL_TYPECHK(ccall method definition, long, jl_exprarg(e, 4));
             }
             if (e->head == method_sym || e->head == abstracttype_sym || e->head == structtype_sym ||
-                e->head == primtype_sym || e->head == module_sym) {
+                     e->head == primtype_sym || e->head == module_sym) {
                 i++;
             }
             for (; i < nargs; i++) {

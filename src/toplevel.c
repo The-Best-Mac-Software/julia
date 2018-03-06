@@ -322,6 +322,10 @@ static void expr_attributes(jl_value_t *v, int *has_intrinsics, int *has_defs)
              head == structtype_sym || jl_is_toplevel_only_expr(v)) {
         *has_defs = 1;
     }
+    else if (head == cfunction_sym) {
+        *has_intrinsics = 1;
+        return;
+    }
     else if (head == foreigncall_sym) {
         *has_intrinsics = 1;
         return;
