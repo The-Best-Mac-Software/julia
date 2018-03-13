@@ -423,7 +423,8 @@ struct jl_cgval_t {
         assert(!(isboxed && TIndex != NULL));
         assert(TIndex == NULL || TIndex->getType() == T_int8);
     }
-    jl_cgval_t(jl_value_t *typ) : // ghost value constructor
+    explicit jl_cgval_t(jl_value_t *typ) : // ghost value constructor
+        // mark explicit to avoid being used implicitly for conversion from NULL (use jl_cgval_t() instead)
         V(NULL),
         Vboxed(NULL),
         TIndex(NULL),
@@ -1426,10 +1427,8 @@ static Function *jl_cfunction_object(jl_value_t *f, jl_value_t *declrt, jl_tuple
 extern "C" JL_DLLEXPORT
 void *jl_function_ptr(jl_function_t *f, jl_value_t *rt, jl_value_t *argt)
 {
-    JL_GC_PUSH1(&argt);
     JL_LOCK(&codegen_lock);
     Function *llvmf = jl_cfunction_object(f, rt, (jl_tupletype_t*)argt);
-    JL_GC_POP();
     void *ptr = (void*)getAddressForFunction(llvmf->getName());
     JL_UNLOCK(&codegen_lock);
     return ptr;
@@ -3693,7 +3692,7 @@ static void emit_assignment(jl_codectx_t &ctx, jl_value_t *l, jl_value_t *r)
 
 // --- convert expression to code ---
 
-static Value *emit_cfunction(jl_codectx_t &ctx, bool makeclosure, jl_value_t *fexpr, jl_value_t *froot, jl_value_t *rt, jl_svec_t *argt);
+static jl_cgval_t emit_cfunction(jl_codectx_t &ctx, jl_value_t *output_type, const jl_cgval_t &fexpr, jl_value_t *rt, jl_svec_t *argt);
 
 static Value *emit_condition(jl_codectx_t &ctx, const jl_cgval_t &condV, const std::string &msg)
 {
@@ -3872,8 +3871,8 @@ static jl_cgval_t emit_expr(jl_codectx_t &ctx, jl_value_t *expr)
         return emit_ccall(ctx, args, jl_array_dim0(ex->args));
     }
     else if (head == cfunction_sym) {
-        Value *F = emit_cfunction(ctx, args[0] == jl_true, args[1], args[2], args[3], (jl_svec_t*)args[4]);
-        return mark_julia_type(ctx, F, false, jl_voidpointer_type);
+        jl_cgval_t fexpr_rt = emit_expr(ctx, args[1]);
+        return emit_cfunction(ctx, args[0], fexpr_rt, args[2], (jl_svec_t*)args[3]);
     }
     else if (head == assign_sym) {
         emit_assignment(ctx, args[0], args[1]);
@@ -4181,6 +4180,7 @@ static void emit_cfunc_invalidate(
 }
 
 static Function* gen_cfun_wrapper(
+    Module *into,
     const function_sig_t &sig, jl_value_t *ff,
     jl_typemap_entry_t *sf, jl_value_t *declrt, jl_tupletype_t *sigt,
     jl_unionall_t *unionall_env, jl_svec_t *sparam_vals, jl_array_t **closure_types)
@@ -4189,7 +4189,7 @@ static Function* gen_cfun_wrapper(
     size_t nargs = sig.nargs;
     const char *name = "cfunction";
     size_t world = jl_world_counter;
-    bool nest = (!ff || !sigt);
+    bool nest = (!ff || unionall_env);
     // try to look up this function for direct invoking
     jl_method_instance_t *lam = sigt ? jl_get_specialization1((jl_tupletype_t*)sigt, world) : NULL;
     jl_value_t *astrt = (jl_value_t*)jl_any_type;
@@ -4197,7 +4197,7 @@ static Function* gen_cfun_wrapper(
     if (lam) {
         name = jl_symbol_name(lam->def.method->name);
         jl_code_info_t *src = NULL;
-        if (!lam->inferred) // TODO: this isn't ideal to be unconditionally calling type inference from here
+        if (!into && !lam->inferred) // TODO: this isn't ideal to be unconditionally calling type inference from here
             src = jl_type_infer(&lam, world, 0);
         jl_compile_linfo(&lam, src, world, &jl_default_cgparams);
         if (lam->jlcall_api != JL_API_CONST) {
@@ -4222,8 +4222,11 @@ static Function* gen_cfun_wrapper(
     std::stringstream funcName;
     funcName << "jlcapi_" << name << "_" << globalUnique++;
 
-    Module *M = new Module(name, jl_LLVMContext);
-    jl_setup_module(M);
+    Module *M = into;
+    if (!M) {
+        M = new Module(name, jl_LLVMContext);
+        jl_setup_module(M);
+    }
 #if JL_LLVM_VERSION >= 50000
     AttributeList attributes = sig.attributes;
 #else
@@ -4249,7 +4252,7 @@ static Function* gen_cfun_wrapper(
 #ifdef JL_DISABLE_FPO
     cw->addFnAttr("no-frame-pointer-elim", "true");
 #endif
-    Function *cw_proto = function_proto(cw);
+    Function *cw_proto = into ? cw : function_proto(cw);
     // Save the Function object reference
     if (sf) {
         jl_value_t *oldsf = sf->func.value;
@@ -4326,7 +4329,7 @@ static Function* gen_cfun_wrapper(
     for (size_t i = 0; i < nargs; ++i, ++AI) {
         // figure out how to unpack this argument type
         Value *val = &*AI;
-        assert(sig.fargt.at(i) == val->getType());
+        assert(sig.fargt_sig.at(i) == val->getType());
         jl_cgval_t &inputarg = inputargs[i + 1];
         jl_value_t *jargty = jl_svecref(sig.at, i);
         bool aref = jl_is_abstract_ref_type(jargty);
@@ -4381,7 +4384,7 @@ static Function* gen_cfun_wrapper(
                 jl_array_ptr_1d_push(*closure_types, jargty);
                 Value *runtime_dt = ctx.builder.CreateLoad(T_prjlvalue,
                         ctx.builder.CreateConstGEP1_32(T_prjlvalue, nestPtr, jl_array_len(*closure_types)));
-                // TODO: check if runtime_dt is jl_any_type (return load of pointer instead)
+                // XXX: check if runtime_dt is jl_any_type (return load of pointer instead)
                 BasicBlock *boxedBB = BasicBlock::Create(jl_LLVMContext, "isboxed", cw);
                 BasicBlock *unboxedBB = BasicBlock::Create(jl_LLVMContext, "maybe-unboxed", cw);
                 BasicBlock *afterBB = BasicBlock::Create(jl_LLVMContext, "after", cw);
@@ -4586,8 +4589,8 @@ static Function* gen_cfun_wrapper(
     }
 
     // inline a call to typeassert here, if required
-    if (!sig.retboxed)
-        emit_typecheck(ctx, retval, declrt, "cfunction");
+    emit_typecheck(ctx, retval, declrt, "cfunction");
+    retval = update_julia_type(ctx, retval, declrt);
 
     // Prepare the return value
     Value *r;
@@ -4605,8 +4608,7 @@ static Function* gen_cfun_wrapper(
         if (sig.sret)
             prt = sig.fargt_sig[0]->getContainedType(0); // sret is a PointerType
         bool issigned = jl_signed_type && jl_subtype(declrt, (jl_value_t*)jl_signed_type);
-        Value *v = julia_to_native(ctx, sig.lrt, sig.retboxed, declrt, NULL, retval,
-                                   false, 0, NULL);
+        Value *v = emit_unbox(ctx, sig.lrt, retval, retval.typ);
         r = llvm_type_rewrite(ctx, v, prt, issigned);
         if (sig.sret) {
             ctx.builder.CreateStore(r, sretPtr);
@@ -4614,7 +4616,6 @@ static Function* gen_cfun_wrapper(
         }
     }
     else {
-        assert(type_is_ghost(sig.lrt));
         r = NULL;
     }
 
@@ -4647,10 +4648,11 @@ static Function* gen_cfun_wrapper(
                 cwbuilder.CreateBitCast(NVal, T_pint8)
             });
         cwbuilder.CreateRet(cwbuilder.CreateCall(adjust_trampoline, { Tramp }));
-        cw_proto = function_proto(cw_make);
+        cw_proto = into ? cw_make : function_proto(cw_make);
     }
 
-    jl_finalize_module(M, true);
+    if (!into)
+        jl_finalize_module(M, true);
 
     return cw_proto;
 }
@@ -4658,7 +4660,7 @@ static Function* gen_cfun_wrapper(
 // Get the LLVM Function* for the C-callable entry point for a certain function
 // and argument types.
 // here argt does not include the leading function type argument
-static Value *emit_cfunction(jl_codectx_t &ctx, bool makeclosure, jl_value_t *fexpr, jl_value_t *froot, jl_value_t *declrt, jl_svec_t *argt)
+static jl_cgval_t emit_cfunction(jl_codectx_t &ctx, jl_value_t *output_type, const jl_cgval_t &fexpr_rt, jl_value_t *declrt, jl_svec_t *argt)
 {
     jl_unionall_t *unionall_env = (jl_is_method(ctx.linfo->def.method) && jl_is_unionall(ctx.linfo->def.method->sig))
         ? (jl_unionall_t*)ctx.linfo->def.method->sig
@@ -4667,24 +4669,21 @@ static Value *emit_cfunction(jl_codectx_t &ctx, bool makeclosure, jl_value_t *fe
     if (ctx.spvals_ptr == NULL && jl_svec_len(ctx.linfo->sparam_vals) > 0)
         sparam_vals = ctx.linfo->sparam_vals;
 
-    jl_cgval_t fexpr_rt;
-    if (makeclosure)
-        fexpr_rt = emit_expr(ctx, fexpr);
-    jl_cgval_t froot_rt = emit_expr(ctx, froot);
-
     jl_value_t *rt = declrt;
     if (jl_is_abstract_ref_type(declrt)) {
         declrt = jl_tparam0(declrt);
         if (!verify_ref_type(ctx, declrt, unionall_env, 0, "cfunction")) {
-            return NULL;
+            return jl_cgval_t();
         }
+        if (unionall_env)
+            declrt = jl_rewrap_unionall(declrt, (jl_value_t*)unionall_env);
         rt = (jl_value_t*)jl_any_type; // convert return type to jl_value_t*
     }
 
     // some sanity checking and check whether there's a vararg
     jl_array_t *closure_types = NULL;
     jl_value_t *sigt = NULL; // dispatch-sig = type signature with Ref{} annotations removed and applied to the env
-    JL_GC_PUSH3(&sigt, &rt, closure_types);
+    JL_GC_PUSH4(&declrt, &sigt, &rt, closure_types);
     bool isVa;
     size_t nargt;
     Type *lrt;
@@ -4700,55 +4699,33 @@ static Value *emit_cfunction(jl_codectx_t &ctx, bool makeclosure, jl_value_t *fe
     if (!err.empty()) {
         emit_error(ctx, "cfunction " + err);
         JL_GC_POP();
-        return NULL;
+        return jl_cgval_t();
     }
     if (rt != declrt && rt != (jl_value_t*)jl_any_type)
         jl_add_method_root(ctx, rt);
 
     function_sig_t sig("cfunction", lrt, rt, retboxed, argt, unionall_env, nargt, isVa, CallingConv::C, false);
     if (sig.err_msg.empty() && (sig.isVa || sig.fargt.size() + sig.sret != sig.fargt_sig.size()))
-        sig.err_msg = "va_arg syntax not allowed for argument list";
+        sig.err_msg = "cfunction: Vararg syntax not allowed for argument list";
     if (!sig.err_msg.empty()) {
         emit_error(ctx, sig.err_msg);
         JL_GC_POP();
-        return NULL;
+        return jl_cgval_t();
     }
 
     // compute+verify the dispatch signature, and see if it depends on the environment sparams
     bool approx = false;
     sigt = (jl_value_t*)jl_alloc_svec(nargt + 1);
-    if (makeclosure) {
-        jl_value_t *pt = fexpr_rt.typ;
-        if (jl_is_cpointer_type(pt)) {
-            pt = jl_tparam0(pt);
-            if (jl_has_free_typevars(pt))
-                pt = (jl_value_t*)jl_any_type;
-        }
-        else {
-            const char *errmsg = "@cfunction first (closure) argument";
-            emit_cpointercheck(ctx, fexpr_rt, errmsg);
-            pt = (jl_value_t*)jl_any_type;
-            fexpr_rt = update_julia_type(ctx, fexpr_rt, (jl_value_t*)jl_voidpointer_type);
-        }
-        jl_svecset(sigt, 0, pt);
-        if (jl_is_datatype(pt) && ((jl_datatype_t*)pt)->instance) {
-            fexpr = ((jl_datatype_t*)pt)->instance;
-            makeclosure = false;
-        }
-        else if (!jl_is_concrete_type(pt) || jl_is_kind(pt)) {
-            approx = true;
-        }
-    }
-    else {
-        jl_svecset(sigt, 0, jl_typeof(fexpr));
-    }
+    jl_svecset(sigt, 0, fexpr_rt.typ);
+    if (!fexpr_rt.constant && (!jl_is_concrete_type(fexpr_rt.typ) || jl_is_kind(fexpr_rt.typ)))
+        approx = true;
     for (size_t i = 0; i < nargt; i++) {
         jl_value_t *jargty = jl_svecref(argt, i);
         if (jl_is_abstract_ref_type(jargty)) {
             jargty = jl_tparam0(jargty);
             if (!verify_ref_type(ctx, jargty, unionall_env, i + 1, "cfunction")) {
                 JL_GC_POP();
-                return NULL;
+                return jl_cgval_t();
             }
         }
         if (unionall_env && jl_has_typevar_from_unionall(jargty, unionall_env)) {
@@ -4764,27 +4741,26 @@ static Value *emit_cfunction(jl_codectx_t &ctx, bool makeclosure, jl_value_t *fe
     }
     else {
         sigt = (jl_value_t*)jl_apply_tuple_type((jl_svec_t*)sigt);
+    }
+    if (sigt && !(unionall_env && jl_has_typevar_from_unionall(rt, unionall_env))) {
         unionall_env = NULL;
     }
 
-    bool nest = (makeclosure || !sigt);
-    assert(fexpr);
-    Value *F = prepare_call(gen_cfun_wrapper(
-            sig, (makeclosure ? NULL : fexpr),
+    bool nest = (!fexpr_rt.constant || unionall_env);
+    Value *F = gen_cfun_wrapper(
+            jl_Module,
+            sig, fexpr_rt.constant,
             NULL, declrt, (jl_tupletype_t*)sigt,
-            unionall_env, sparam_vals, &closure_types));
+            unionall_env, sparam_vals, &closure_types);
+    bool outboxed;
     if (nest) {
         // F is actually an init_trampoline function that returns the real address
         // Now fill in the nest parameters
         Value *fobj;
-        if (makeclosure) {
-            fobj = emit_unbox(ctx, T_size, fexpr_rt, (jl_value_t*)jl_voidpointer_type);
-            fobj = ctx.builder.CreateIntToPtr(fobj, T_pjlvalue);
-            fobj = maybe_decay_untracked(fobj);
-        }
-        else {
+        if (!fexpr_rt.constant)
+            fobj = boxed(ctx, fexpr_rt);
+        else
             fobj = V_null;
-        }
         jl_svec_t *fill = jl_emptysvec;
         if (closure_types) {
             assert(ctx.spvals_ptr);
@@ -4803,18 +4779,38 @@ static Value *emit_cfunction(jl_codectx_t &ctx, bool makeclosure, jl_value_t *fe
                                ConstantAggregateZero::get(T_htable),
                                cname.str());
         F = ctx.builder.CreateCall(prepare_call(jlgetcfunctiontrampoline_func), {
-                 ctx.builder.CreateBitCast(cache, T_pint8),
-                 boxed(ctx, froot_rt),
-                 F,
                  fobj,
+                 literal_pointer_val(ctx, output_type),
+                 ctx.builder.CreateBitCast(cache, T_pint8),
                  literal_pointer_val(ctx, (jl_value_t*)fill),
+                 F,
                  closure_types ? literal_pointer_val(ctx, (jl_value_t*)unionall_env) : V_null,
                  closure_types ? ctx.spvals_ptr : ConstantPointerNull::get(cast<PointerType>(T_pprjlvalue))
              });
+        outboxed = true;
     }
-    F = ctx.builder.CreatePtrToInt(F, T_size);
+    else {
+        F = ctx.builder.CreatePtrToInt(F, T_size);
+        outboxed = (output_type != (jl_value_t*)jl_voidpointer_type);
+        if (outboxed) {
+            assert(jl_datatype_size(output_type) == sizeof(void*) * 4);
+            Value *strct = emit_allocobj(ctx, jl_datatype_size(output_type),
+                                         literal_pointer_val(ctx, (jl_value_t*)output_type));
+            Value *derived_strct = emit_bitcast(ctx, decay_derived(strct), T_psize);
+            MDNode *tbaa = best_tbaa(output_type);
+            tbaa_decorate(tbaa, ctx.builder.CreateStore(F, derived_strct));
+            tbaa_decorate(tbaa, ctx.builder.CreateStore(
+                ctx.builder.CreatePtrToInt(literal_pointer_val(ctx, fexpr_rt.constant), T_size),
+                ctx.builder.CreateConstGEP1_32(T_size, derived_strct, 1)));
+            Value *zero = ConstantInt::get(T_size, 0);
+            for (size_t i = 2; i < 4; i++)
+                tbaa_decorate(tbaa, ctx.builder.CreateStore(zero,
+                        ctx.builder.CreateConstGEP1_32(T_size, derived_strct, i)));
+            F = strct;
+        }
+    }
     JL_GC_POP();
-    return F;
+    return mark_julia_type(ctx, F, outboxed, output_type);
 }
 
 const struct jl_typemap_info cfunction_cache = {
@@ -4826,10 +4822,13 @@ jl_array_t *jl_cfunction_list;
 static Function *jl_cfunction_object(jl_value_t *ff, jl_value_t *declrt, jl_tupletype_t *argt)
 {
     // Assumes the codegen lock is acquired. The caller is responsible for that.
+    jl_ptls_t ptls = jl_get_ptls_states();
+    if (ptls->in_pure_callback)
+        jl_error("cfunction cannot be used in a generated function");
 
     // validate and unpack the arguments
     JL_TYPECHK(cfunction, type, declrt);
-    if (!jl_is_tuple_type(argt)) // the C API requires that argt actually be an svec
+    if (!jl_is_tuple_type(argt)) // the C API requires that argt Tuple type actually be an svec
         jl_type_error("cfunction", (jl_value_t*)jl_anytuple_type_type, (jl_value_t*)argt);
     // trampolines are not supported here:
     // check that f is a guaranteed singleton type
@@ -4859,9 +4858,7 @@ static Function *jl_cfunction_object(jl_value_t *ff, jl_value_t *declrt, jl_tupl
                 for (i = 0; i < l; i += 2) {
                     jl_value_t *ti = jl_svecref(sf, i);
                     if (jl_egal(ti, declrt)) {
-                        Function *F = (Function*)jl_unbox_voidpointer(jl_svecref(sf, i + 1));
-                        JL_GC_POP();
-                        return F;
+                        return (Function*)jl_unbox_voidpointer(jl_svecref(sf, i + 1));
                     }
                 }
             }
@@ -4926,7 +4923,7 @@ static Function *jl_cfunction_object(jl_value_t *ff, jl_value_t *declrt, jl_tupl
             err = NULL;
         }
         else {
-            Function *F = gen_cfun_wrapper(sig, ff, cache_l3, declrt, (jl_tupletype_t*)sigt, NULL, NULL, NULL);
+            Function *F = gen_cfun_wrapper(NULL, sig, ff, cache_l3, declrt, (jl_tupletype_t*)sigt, NULL, NULL, NULL);
             JL_GC_POP();
             return F;
         }
@@ -7144,15 +7141,15 @@ static void init_julia_llvm_env(Module *m)
     add_named_global(jldlsym_func, &jl_load_and_lookup);
 
     std::vector<Type *> getcfunctiontrampoline_args(0);
-    getcfunctiontrampoline_args.push_back(T_pint8); // cache
-    getcfunctiontrampoline_args.push_back(T_prjlvalue); // finalizer
-    getcfunctiontrampoline_args.push_back(FunctionType::get(T_pint8, { T_pint8, T_ppjlvalue }, false)->getPointerTo()); // trampoline
     getcfunctiontrampoline_args.push_back(T_prjlvalue); // f (object)
+    getcfunctiontrampoline_args.push_back(T_pjlvalue); // result
+    getcfunctiontrampoline_args.push_back(T_pint8); // cache
     getcfunctiontrampoline_args.push_back(T_pjlvalue); // fill
+    getcfunctiontrampoline_args.push_back(FunctionType::get(T_pint8, { T_pint8, T_ppjlvalue }, false)->getPointerTo()); // trampoline
     getcfunctiontrampoline_args.push_back(T_pjlvalue); // env
     getcfunctiontrampoline_args.push_back(T_pprjlvalue); // vals
     jlgetcfunctiontrampoline_func =
-        Function::Create(FunctionType::get(T_pint8, getcfunctiontrampoline_args, false),
+        Function::Create(FunctionType::get(T_prjlvalue, getcfunctiontrampoline_args, false),
                          Function::ExternalLinkage,
                          "jl_get_cfunction_trampoline", m);
     add_return_attr(jlgetcfunctiontrampoline_func, Attribute::NonNull);

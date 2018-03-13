@@ -771,11 +771,11 @@ function substitute!(
             return quoted(spvals[e.args[1]])
         elseif head === :cfunction
             @assert !isa(spsig, UnionAll) || !isempty(spvals)
-            e.args[4] = ccall(:jl_instantiate_type_in_env, Any, (Any, Any, Ptr{Any}), e.args[4], spsig, spvals)
-            e.args[5] = svec(Any[
+            e.args[3] = ccall(:jl_instantiate_type_in_env, Any, (Any, Any, Ptr{Any}), e.args[3], spsig, spvals)
+            e.args[4] = svec(Any[
                 ccall(:jl_instantiate_type_in_env, Any, (Any, Any, Ptr{Any}), argt, spsig, spvals)
                 for argt
-                in e.args[5] ]...)
+                in e.args[4] ]...)
         elseif head === :foreigncall
             @assert !isa(spsig, UnionAll) || !isempty(spvals)
             for i = 1:length(e.args)

@@ -349,8 +349,8 @@ function fetchhead_foreach_callback(ref_name::Cstring, remote_url::Cstring,
 end
 
 "C function pointer for `mirror_callback`"
-mirror_cb() = cfunction(mirror_callback, Cint, Tuple{Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Cstring, Cstring, Ptr{Cvoid}})
+mirror_cb() = @cfunction(mirror_callback, Cint, (Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Cstring, Cstring, Ptr{Cvoid}))
 "C function pointer for `credentials_callback`"
-credentials_cb() = cfunction(credentials_callback, Cint, Tuple{Ptr{Ptr{Cvoid}}, Cstring, Cstring, Cuint, Ptr{Cvoid}})
+credentials_cb() = @cfunction(credentials_callback, Cint, (Ptr{Ptr{Cvoid}}, Cstring, Cstring, Cuint, Ptr{Cvoid}))
 "C function pointer for `fetchhead_foreach_callback`"
-fetchhead_foreach_cb() = cfunction(fetchhead_foreach_callback, Cint, Tuple{Cstring, Cstring, Ptr{GitHash}, Cuint, Ptr{Cvoid}})
+fetchhead_foreach_cb() = @cfunction(fetchhead_foreach_callback, Cint, (Cstring, Cstring, Ptr{GitHash}, Cuint, Ptr{Cvoid}))

@@ -663,8 +663,8 @@ function abstract_call(@nospecialize(f), fargs::Union{Tuple{},Vector{Any}}, argt
     return abstract_call_gf_by_type(f, argtypes, atype, sv)
 end
 
-function abstract_eval_call(e::Expr, vtypes::VarTable, sv::InferenceState)
-    argtypes = Any[abstract_eval(a, vtypes, sv) for a in e.args]
+# wrapper around `abstract_call` for first computing if `f` is available
+function abstract_eval_call(fargs::Union{Tuple{},Vector{Any}}, argtypes::Vector{Any}, vtypes::VarTable, sv::InferenceState)
     #print("call ", e.args[1], argtypes, "\n\n")
     for x in argtypes
         x === Bottom && return Bottom
@@ -689,7 +689,53 @@ function abstract_eval_call(e::Expr, vtypes::VarTable, sv::InferenceState)
         end
         return abstract_call_gf_by_type(nothing, argtypes, argtypes_to_type(argtypes), sv)
     end
-    return abstract_call(f, e.args, argtypes, vtypes, sv)
+    return abstract_call(f, fargs, argtypes, vtypes, sv)
+end
+
+function sp_type_rewrap(@nospecialize(T), linfo::MethodInstance, isreturn::Bool)
+    isref = false
+    if T === Bottom
+        return Bottom
+    elseif isa(T, Type)
+        if isa(T, DataType) && (T::DataType).name === _REF_NAME
+            isref = true
+            T = T.parameters[1]
+            if isreturn && T === Any
+                return Bottom # a return type of Ref{Any} is invalid
+            end
+        end
+    else
+        return Any
+    end
+    if isa(linfo.def, Method)
+        spsig = linfo.def.sig
+        if isa(spsig, UnionAll)
+            if !isempty(linfo.sparam_vals)
+                env = pointer_from_objref(linfo.sparam_vals) + sizeof(Ptr{Cvoid})
+                T = ccall(:jl_instantiate_type_in_env, Any, (Any, Any, Ptr{Any}), T, spsig, env)
+                for v in linfo.sparam_vals
+                    if isa(v, TypeVar)
+                        T = UnionAll(v, T)
+                    end
+                end
+            else
+                T = rewrap_unionall(T, spsig)
+            end
+        end
+    end
+    isref && isreturn && T === Any && return Bottom # catch invalid return Ref{T} where T = Any
+    return T
+end
+
+function abstract_eval_cfunction(e::Expr, vtypes::VarTable, sv::InferenceState)
+    f = abstract_eval(e.args[2], vtypes, sv)
+    # rt = sp_type_rewrap(e.args[3], sv.linfo, true)
+    at = Any[ sp_type_rewrap(argt, sv.linfo, false) for argt in e.args[4]::SimpleVector ]
+    pushfirst!(at, f)
+    # this may be the wrong world for the call,
+    # but some of the result is likely to be valid anyways
+    # and that may help generate better codegen
+    abstract_eval_call((), at, vtypes, sv)
 end
 
 function abstract_eval(@nospecialize(e), vtypes::VarTable, sv::InferenceState)
@@ -710,7 +756,8 @@ function abstract_eval(@nospecialize(e), vtypes::VarTable, sv::InferenceState)
     end
     e = e::Expr
     if e.head === :call
-        t = abstract_eval_call(e, vtypes, sv)
+        argtypes = Any[ abstract_eval(a, vtypes, sv) for a in e.args ]
+        t = abstract_eval_call(e.args, argtypes, vtypes, sv)
     elseif e.head === :new
         t = instanceof_tfunc(abstract_eval(e.args[1], vtypes, sv))[1]
         for i = 2:length(e.args)
@@ -722,44 +769,17 @@ function abstract_eval(@nospecialize(e), vtypes::VarTable, sv::InferenceState)
         abstract_eval(e.args[1], vtypes, sv)
         t = Any
     elseif e.head === :foreigncall
-        rt = e.args[2]
-        if isa(sv.linfo.def, Method)
-            spsig = sv.linfo.def.sig
-            if isa(spsig, UnionAll)
-                if !isempty(sv.linfo.sparam_vals)
-                    env = pointer_from_objref(sv.linfo.sparam_vals) + sizeof(Ptr{Cvoid})
-                    rt = ccall(:jl_instantiate_type_in_env, Any, (Any, Any, Ptr{Any}), e.args[2], spsig, env)
-                else
-                    rt = rewrap_unionall(e.args[2], spsig)
-                end
-            end
-        end
         abstract_eval(e.args[1], vtypes, sv)
+        t = sp_type_rewrap(e.args[2], sv.linfo, true)
         for i = 3:length(e.args)
             if abstract_eval(e.args[i], vtypes, sv) === Bottom
                 t = Bottom
             end
         end
-        if rt === Bottom
-            t = Bottom
-        elseif isa(rt, Type)
-            t = rt
-            if isa(t, DataType) && (t::DataType).name === _REF_NAME
-                t = t.parameters[1]
-                if t === Any
-                    t = Bottom # a return type of Box{Any} is invalid
-                end
-            end
-            for v in sv.linfo.sparam_vals
-                if isa(v,TypeVar)
-                    t = UnionAll(v, t)
-                end
-            end
-        else
-            t = Any
-        end
     elseif e.head === :cfunction
-        t = Ptr{Nothing}
+        t = e.args[1]
+        isa(t, Type) || (t = Any)
+        abstract_eval_cfunction(e, vtypes, sv)
     elseif e.head === :static_parameter
         n = e.args[1]
         t = Any

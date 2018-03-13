@@ -743,14 +743,11 @@ extern void *jl_winsock_handle;
 void *jl_get_library(const char *f_lib);
 JL_DLLEXPORT void *jl_load_and_lookup(const char *f_lib, const char *f_name,
                                       void **hnd);
-JL_DLLEXPORT void *jl_get_cfunction_trampoline(
-    htable_t *cache, // weakref htable indexed by (f, vals)
-    jl_value_t *finalizer, // cleanup when this is deleted
+JL_DLLEXPORT jl_value_t *jl_get_cfunction_trampoline(
+    jl_value_t *fobj, jl_datatype_t *result, htable_t *cache, jl_svec_t *fill,
     void *(*init_trampoline)(void *tramp, void **nval),
-    jl_value_t *f,
-    jl_svec_t *fill,
-    jl_unionall_t *env,
-    jl_value_t **vals);
+    jl_unionall_t *env, jl_value_t **vals);
+
 
 // Windows only
 #define JL_EXE_LIBNAME ((const char*)1)

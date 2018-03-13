@@ -43,17 +43,18 @@ static jl_value_t *resolve_globals(jl_value_t *expr, jl_module_t *module, jl_sve
         else {
             size_t i = 0, nargs = jl_array_len(e->args);
             if (e->head == cfunction_sym) {
-                JL_NARGS(cfunction method definition, 6, 6); // (isclosure, func, root, rt, at, cc)
-                jl_value_t *isclosure = jl_exprarg(e, 0);
-                if (isclosure != jl_true && isclosure != jl_false)
-                    jl_error("first parameter to :cfunction must be literal true or false");
-                if (isclosure == jl_false) {
+                JL_NARGS(cfunction method definition, 5, 5); // (type, func, rt, at, cc)
+                jl_value_t *typ = jl_exprarg(e, 0);
+                if (!jl_is_type(typ))
+                    jl_error("first parameter to :cfunction must be a type");
+                if (typ == (jl_value_t*)jl_voidpointer_type) {
                     jl_value_t *a = jl_exprarg(e, 1);
-                    a = jl_interpret_toplevel_expr_in(module, a, NULL, NULL);
-                    jl_exprargset(e, 1, a);
+                    JL_TYPECHK(cfunction method definition, quotenode, a);
+                    *(jl_value_t**)a = jl_toplevel_eval(module, *(jl_value_t**)a);
+                    jl_gc_wb(a, *(jl_value_t**)a);
                 }
-                jl_value_t *rt = jl_exprarg(e, 3);
-                jl_value_t *at = jl_exprarg(e, 4);
+                jl_value_t *rt = jl_exprarg(e, 2);
+                jl_value_t *at = jl_exprarg(e, 3);
                 if (!jl_is_type(rt)) {
                     JL_TRY {
                         rt = jl_interpret_toplevel_expr_in(module, rt, NULL, sparam_vals);
@@ -64,7 +65,7 @@ static jl_value_t *resolve_globals(jl_value_t *expr, jl_module_t *module, jl_sve
                         else
                             jl_rethrow();
                     }
-                    jl_exprargset(e, 3, rt);
+                    jl_exprargset(e, 2, rt);
                 }
                 if (!jl_is_svec(at)) {
                     JL_TRY {
@@ -76,14 +77,14 @@ static jl_value_t *resolve_globals(jl_value_t *expr, jl_module_t *module, jl_sve
                         else
                             jl_rethrow();
                     }
-                    jl_exprargset(e, 4, at);
+                    jl_exprargset(e, 3, at);
                 }
                 if (jl_is_svec(rt))
                     jl_error("cfunction: missing return type");
                 JL_TYPECHK(cfunction method definition, type, rt);
                 JL_TYPECHK(cfunction method definition, simplevector, at);
-                JL_TYPECHK(cfunction method definition, quotenode, jl_exprarg(e, 5));
-                JL_TYPECHK(cfunction method definition, symbol, *(jl_value_t**)jl_exprarg(e, 5));
+                JL_TYPECHK(cfunction method definition, quotenode, jl_exprarg(e, 4));
+                JL_TYPECHK(cfunction method definition, symbol, *(jl_value_t**)jl_exprarg(e, 4));
                 return expr;
             }
             if (e->head == foreigncall_sym) {
@@ -571,11 +572,10 @@ static jl_method_t *jl_new_method(
     JL_GC_PUSH1(&root);
 
     m = jl_new_method_uninit(inmodule);
-    m->sparam_syms = sparam_syms;
     root = (jl_value_t*)m;
-    m->min_world = ++jl_world_counter;
-    m->name = name;
     m->sig = (jl_value_t*)sig;
+    m->sparam_syms = sparam_syms;
+    m->name = name;
     m->isva = isva;
     m->nargs = nargs;
     jl_method_set_source(m, definition);
@@ -591,6 +591,7 @@ static jl_method_t *jl_new_method(
     }
 
     JL_GC_POP();
+    m->min_world = ++jl_world_counter;
     return m;
 }
 

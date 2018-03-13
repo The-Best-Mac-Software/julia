@@ -1393,7 +1393,7 @@ static std::pair<CallingConv::ID, bool> convert_cconv(jl_sym_t *lhd)
 static bool verify_ref_type(jl_codectx_t &ctx, jl_value_t* ref, jl_unionall_t *unionall_env, int n, const char *fname)
 {
     // emit verification that the tparam for Ref isn't Any or a TypeVar
-    const char rt_err_msg_notany[] = " type Ref{Any} is invalid. use Ptr{Any} instead.";
+    const char rt_err_msg_notany[] = " type Ref{Any} is invalid. Use Any or Ptr{Any} instead.";
     if (ref == (jl_value_t*)jl_any_type && n == 0) {
         emit_error(ctx, make_errmsg(fname, n, rt_err_msg_notany));
         return false;
@@ -1776,44 +1776,6 @@ static jl_cgval_t emit_ccall(jl_codectx_t &ctx, jl_value_t **args, size_t nargs)
         ctx.f->getBasicBlockList().push_back(contBB);
         ctx.builder.SetInsertPoint(contBB);
         return ghostValue(jl_void_type);
-    }
-    else if (is_libjulia_func(jl_function_ptr)) {
-        assert(!isVa && !llvmcall && nargt == 3);
-        assert(lrt == T_size);
-        jl_value_t *ff = argv[0].constant;
-        jl_value_t *frt = argv[1].constant;
-        if (!frt) {
-            if (jl_is_type_type(argv[1].typ) && !jl_has_free_typevars(argv[1].typ))
-                frt = jl_tparam0(argv[1].typ);
-        }
-        if (ff && frt) {
-            jl_value_t *fargt = argv[2].constant;
-            JL_GC_PUSH1(&fargt);
-            if (!fargt && jl_is_type_type(argv[2].typ)) {
-                if (!jl_has_free_typevars(argv[2].typ))
-                    fargt = jl_tparam0(argv[2].typ);
-            }
-            else if (fargt && jl_is_tuple(fargt)) {
-                // TODO: maybe deprecation warning, better checking
-                fargt = (jl_value_t*)jl_apply_tuple_type_v((jl_value_t**)jl_data_ptr(fargt), jl_nfields(fargt));
-            }
-            if (fargt && jl_is_tuple_type(fargt)) {
-                Value *llvmf = NULL;
-                JL_TRY {
-                    llvmf = jl_cfunction_object(ff, frt, (jl_tupletype_t*)fargt);
-                }
-                JL_CATCH {
-                    llvmf = NULL;
-                }
-                if (llvmf) {
-                    JL_GC_POP();
-                    JL_GC_POP();
-                    Value *fptr = ctx.builder.CreatePtrToInt(prepare_call(llvmf), lrt);
-                    return mark_or_box_ccall_result(ctx, fptr, retboxed, rt, unionall, static_rt);
-                }
-            }
-            JL_GC_POP();
-        }
     }
     else if (is_libjulia_func(jl_array_isassigned) &&
              argv[1].typ == (jl_value_t*)jl_ulong_type) {

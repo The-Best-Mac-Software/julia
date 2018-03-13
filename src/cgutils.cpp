@@ -2510,8 +2510,8 @@ static jl_cgval_t emit_new_struct(jl_codectx_t &ctx, jl_value_t *ty, size_t narg
             if (jl_field_isptr(sty, i)) {
                 tbaa_decorate(strctinfo.tbaa, ctx.builder.CreateStore(
                         ConstantPointerNull::get(cast<PointerType>(T_prjlvalue)),
-                            ctx.builder.CreateGEP(T_prjlvalue, emit_bitcast(ctx, strct, T_pprjlvalue),
-                                ConstantInt::get(T_size, jl_field_offset(sty, i) / sizeof(void*)))));
+                        ctx.builder.CreateGEP(T_prjlvalue, emit_bitcast(ctx, strct, T_pprjlvalue),
+                            ConstantInt::get(T_size, jl_field_offset(sty, i) / sizeof(void*)))));
             }
         }
         for (size_t i = nargs; i < nf; i++) {

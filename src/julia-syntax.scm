@@ -3576,7 +3576,10 @@ f(x) = yt(x)
                                     (list-head (cddr e) 4)
                                     (compile-args (list-tail e 6) break-labels linearize-args)))
                            ;; NOTE: arguments of cfunction must be left in place
-                           ((eq? (car e) 'cfunction) (cdr e))
+                           ;;       except for argument 2 (fptr)
+                           ((eq? (car e) 'cfunction)
+                            (let ((fptr (car (compile-args (list (caddr e)) break-labels linearize-args))))
+                              (cons (cadr e) (cons fptr (cdddr e)))))
                            ;; TODO: evaluate first argument to cglobal some other way
                            ((and (length> e 2)
                                  (or (eq? (cadr e) 'cglobal)

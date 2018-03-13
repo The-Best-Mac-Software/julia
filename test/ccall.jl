@@ -764,87 +764,105 @@ ci64 = Complex{Int64}(Int64(20),Int64(51))
 s1 = Struct1(352.39422f23, 19.287577)
 ==(a::Struct1,b::Struct1) = a.x == b.x && a.y == b.y
 
-for (t,v) in ((Complex{Int32},:ci32),(Complex{Int64},:ci64),
-              (ComplexF32,:cf32),(ComplexF64,:cf64),(Struct1,:s1))
-    fname = Symbol("foo",v)
-    fname1 = Symbol("foo1",v)
+for (t, v) in ((Complex{Int32}, :ci32), (Complex{Int64}, :ci64),
+              (ComplexF32, :cf32), (ComplexF64, :cf64), (Struct1, :s1))
+    fname = Symbol("foo", v)
+    fname1 = Symbol("foo1", v)
+    a = copy(@eval $v)
     @eval begin
         verbose && println($t)
-        a = copy($v)
-        verbose && println("A: ",a)
-        function $fname1(s::$t)
-            verbose && println("B: ",s)
+        verbose && println("A: ", a)
+        global function $fname1(s::$t)
+            verbose && println("B: ", s)
             @test s == $v
-            @test s === a
+            @test s === $a
             global c = s
-            s
+            return s
         end
-        function $fname1(s)
+        global function $fname1(s)
             @assert false
         end
-        function $fname(s::$t)
-            verbose && println("B: ",s)
+        global function $fname(s::$t)
+            verbose && println("B: ", s)
             @test s == $v
             if($(t).mutable)
-                @test !(s === a)
+                @test !(s === $a)
             end
             global c = s
-            s
+            return s
         end
-        function $fname(s)
+        global function $fname(s)
             @assert false
         end
-        b = ccall(cfunction($fname1, Ref{$t}, Tuple{Ref{$t}}), Ref{$t}, (Ref{$t},), a)
-        verbose && println("C: ",b)
+    end
+    @eval let a = $a, b
+        let cf = @cfunction($fname1, Ref{$t}, (Ref{$t},))
+            b = ccall(cf, Ref{$t}, (Ref{$t},), a)
+        end
+        verbose && println("C: ", b)
         @test b == $v
         @test b === a
         @test b === c
-        b = ccall(cfunction($fname, $t, Tuple{$t}), $t, ($t,), a)
+        let cf = @cfunction($fname, $t, ($t,))
+            b = ccall(cf, $t, ($t,), a)
+        end
         verbose && println("C: ",b)
         @test b == $v
         if ($(t).mutable)
             @test !(b === c)
             @test !(b === a)
         end
-        b = ccall(cfunction($fname1, $t, Tuple{Ref{$t}}), $t, (Ref{$t},), a)
+        let cf = @cfunction($fname1, $t, (Ref{$t},))
+            b = ccall(cf, $t, (Ref{$t},), a)
+        end
         verbose && println("C: ",b)
         @test b == $v
         if ($(t).mutable)
             @test !(b === c)
             @test !(b === a)
         end
-        b = ccall(cfunction($fname, Ref{$t}, Tuple{$t}), Ref{$t}, ($t,), a)
+        let cf = @cfunction($fname, Ref{$t}, ($t,))
+            b = ccall(cf, Ref{$t}, ($t,), a)
+        end
         verbose && println("C: ",b)
         @test b == $v
         @test b === c
         if ($(t).mutable)
             @test !(b === a)
         end
-        b = ccall(cfunction($fname, Any, Tuple{Ref{$t}}), Any, (Ref{$t},), $v)
+        let cf = @cfunction($fname, Any, (Ref{$t},))
+            b = ccall(cf, Any, (Ref{$t},), $v)
+        end
         verbose && println("C: ",b)
         @test b == $v
         @test b === c
         if ($(t).mutable)
             @test !(b === a)
         end
-        b = ccall(cfunction($fname, Any, Tuple{Ref{Any}}), Any, (Ref{Any},), $v)
+        let cf = @cfunction($fname, Any, (Ref{Any},))
+            b = ccall(cf, Any, (Ref{Any},), $v)
+        end
         @test b == $v
         @test b === c
         if ($(t).mutable)
             @test !(b === a)
         end
-        @test_throws TypeError ccall(cfunction($fname, Ref{AbstractString}, Tuple{Ref{Any}}), Any, (Ref{Any},), $v)
-        @test_throws TypeError ccall(cfunction($fname, AbstractString, Tuple{Ref{Any}}), Any, (Ref{Any},), $v)
+        let cf = @cfunction($fname, Ref{AbstractString}, (Ref{Any},))
+            @test_throws TypeError ccall(cf, Any, (Ref{Any},), $v)
+        end
+        let cf = @cfunction($fname, AbstractString, (Ref{Any},))
+            @test_throws TypeError ccall(cf, Any, (Ref{Any},), $v)
+        end
     end
 end
 
 # issue 13031
 foo13031(x) = Cint(1)
-foo13031p = cfunction(foo13031, Cint, Tuple{Ref{Tuple{}}})
+foo13031p = @cfunction(foo13031, Cint, (Ref{Tuple{}},))
 ccall(foo13031p, Cint, (Ref{Tuple{}},), ())
 
 foo13031(x,y,z) = z
-foo13031p = cfunction(foo13031, Cint, Tuple{Ref{Tuple{}}, Ref{Tuple{}}, Cint})
+foo13031p = @cfunction(foo13031, Cint, (Ref{Tuple{}}, Ref{Tuple{}}, Cint))
 ccall(foo13031p, Cint, (Ref{Tuple{}},Ref{Tuple{}},Cint), (), (), 8)
 
 # issue 17219
@@ -996,10 +1014,9 @@ if Sys.ARCH === :x86_64
         T = NTuple{4, VecElement{s}}
         @eval function rt_sse(a1::$T, a2::$T, a3::$T, a4::$T)
             return ccall(
-                cfunction(foo_ams, $T, Tuple{$T, $T, $T, $T}),
-                $T,
-                ($T, $T, $T, $T),
-                a1,  a2,  a3, a4)
+                @cfunction(foo_ams, $T, ($T, $T, $T, $T)),
+                $T, ($T, $T, $T, $T),
+                     a1, a2, a3, a4)
         end
 
         a1 = VecReg(ntuple(i -> VecElement(s(1i)), 4))
@@ -1146,7 +1163,7 @@ function f17204(a)
     end
     return b
 end
-@test ccall(cfunction(f17204, Vector{Any}, Tuple{Vector{Any}}),
+@test ccall(@cfunction(f17204, Vector{Any}, (Vector{Any},)),
             Vector{Any}, (Vector{Any},), Any[1:10;]) == Any[11:20;]
 
 # This used to trigger incorrect ccall callee inlining.
@@ -1273,7 +1290,7 @@ end
 struct CallableSingleton
 end
 (::CallableSingleton)(x, y) = x + y
-@test ccall(cfunction(CallableSingleton(), Int, Tuple{Int,Int}),
+@test ccall(@cfunction(CallableSingleton(), Int, (Int, Int)),
             Int, (Int, Int), 1, 2) === 3
 
 # 19805
@@ -1283,21 +1300,21 @@ end
 
 evalf_callback_19805(ci::callinfos_19805{FUNC_FT}) where {FUNC_FT} = ci.f(0.5)::Float64
 
-evalf_callback_c_19805(ci::callinfos_19805{FUNC_FT}) where {FUNC_FT} = cfunction(
-    evalf_callback_19805, Float64, Tuple{callinfos_19805{FUNC_FT}})
+evalf_callback_c_19805(ci::callinfos_19805{FUNC_FT}) where {FUNC_FT} = @cfunction(
+    evalf_callback_19805, Float64, (callinfos_19805{FUNC_FT},))
 
 @test_throws(ErrorException("cfunction argument 1 doesn't correspond to a C type"),
              evalf_callback_c_19805( callinfos_19805(sin) ))
 @test_throws(ErrorException("cfunction argument 2 doesn't correspond to a C type"),
-             cfunction(+, Int, Tuple{Int, Nothing}))
-@test_throws(ErrorException("cfunction: Vararg syntax not allowed for cfunction argument list"),
-             cfunction(+, Int, Tuple{Vararg{Int}}))
-@test_throws(ErrorException("cfunction: argument type Ref should have an element type, not Ref{<:T}"),
-             cfunction(+, Int, Tuple{Ref{T}, Ref{T}}) where T)
-@test_throws(ErrorException("cfunction: return type Ref should have an element type, not Ref{<:T}"),
-             cfunction(+, Ref{T}, Tuple{Int, Int}) where T)
-@test_throws(ErrorException("cfunction: return type Ref{Any} is invalid. Use Any or Ptr{Any} instead."),
-             cfunction(+, Ref{Any}, Tuple{Int, Int}))
+             @cfunction(+, Int, (Int, Nothing)))
+@test_throws(ErrorException("cfunction: Vararg syntax not allowed for argument list"),
+             @cfunction(+, Int, (Vararg{Int},)))
+@test_throws(ErrorException("could not evaluate cfunction argument type (it might depend on a local variable)"),
+             @eval () -> @cfunction(+, Int, (Ref{T}, Ref{T})) where T)
+@test_throws(ErrorException("could not evaluate cfunction return type (it might depend on a local variable)"),
+             @eval () -> @cfunction(+, Ref{T}, (Int, Int)) where T)
+@test_throws(ErrorException("cfunction return type Ref{Any} is invalid. Use Any or Ptr{Any} instead."),
+             @cfunction(+, Ref{Any}, (Int, Int)))
 
 # test Ref{abstract_type} calling parameter passes a heap box
 abstract type Abstract22734 end
@@ -1310,7 +1327,7 @@ function cb22734(ptr::Ptr{Cvoid})
     obj = unsafe_pointer_to_objref(ptr)::Bits22734
     obj.x + obj.y
 end
-ptr22734 = cfunction(cb22734, Float64, Tuple{Ptr{Cvoid}})
+ptr22734 = @cfunction(cb22734, Float64, (Ptr{Cvoid},))
 function caller22734(ptr)
     obj = Bits22734(12, 20)
     ccall(ptr, Float64, (Ref{Abstract22734},), obj)

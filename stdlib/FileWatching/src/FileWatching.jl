@@ -268,12 +268,6 @@ function _uv_hook_close(uv::FileMonitor)
     nothing
 end
 
-function __init__()
-    global uv_jl_pollcb        = cfunction(uv_pollcb, Cvoid, Tuple{Ptr{Cvoid}, Cint, Cint})
-    global uv_jl_fspollcb      = cfunction(uv_fspollcb, Cvoid, Tuple{Ptr{Cvoid}, Cint, Ptr{Cvoid}, Ptr{Cvoid}})
-    global uv_jl_fseventscb    = cfunction(uv_fseventscb, Cvoid, Tuple{Ptr{Cvoid}, Ptr{Int8}, Int32, Int32})
-end
-
 function uv_fseventscb(handle::Ptr{Cvoid}, filename::Ptr, events::Int32, status::Int32)
     t = @handle_as handle FileMonitor
     fname = filename == C_NULL ? "" : unsafe_string(convert(Ptr{UInt8}, filename))
@@ -315,6 +309,11 @@ function uv_fspollcb(handle::Ptr{Cvoid}, status::Int32, prev::Ptr, curr::Ptr)
     nothing
 end
 
+function __init__()
+    global uv_jl_pollcb        = @cfunction(uv_pollcb, Cvoid, (Ptr{Cvoid}, Cint, Cint))
+    global uv_jl_fspollcb      = @cfunction(uv_fspollcb, Cvoid, (Ptr{Cvoid}, Cint, Ptr{Cvoid}, Ptr{Cvoid}))
+    global uv_jl_fseventscb    = @cfunction(uv_fseventscb, Cvoid, (Ptr{Cvoid}, Ptr{Int8}, Int32, Int32))
+end
 
 function start_watching(t::_FDWatcher)
     readable = t.refcount[1] > 0

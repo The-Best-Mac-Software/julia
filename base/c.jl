@@ -35,6 +35,15 @@ Ptr{Cvoid} @0x000000001b82fcd0
 """
 cfunction(f, r, a) = ccall(:jl_function_ptr, Ptr{Cvoid}, (Any, Any, Any), f, r, a)
 
+struct CFunction
+    ptr::Ptr{Cvoid}
+    f::Any
+    _1::Ptr{Cvoid}
+    _2::Ptr{Cvoid}
+    let construtor = false end
+end
+unsafe_convert(::Type{Ptr{Cvoid}}, cf::CFunction) = cf.ptr
+
 macro cfunction(f, at, rt)
     if !(isa(rt, Expr) && rt.head === :tuple)
         throw(ArgumentError("@cfunction argument types must be a literal tuple"))
@@ -42,19 +51,14 @@ macro cfunction(f, at, rt)
     rt.head = :call
     pushfirst!(rt.args, GlobalRef(Core, :svec))
     if isa(f, Expr) && f.head === :$
-        closure = true
-        fptr = :fptr
-        gcptr = :f
+        fptr = f.args[1]
+        typ = CFunction
     else
-        closure = false
-        fptr = esc(f)
-        gcptr = nothing
+        fptr = QuoteNode(f)
+        typ = Ptr{Cvoid}
     end
-    cfun = Expr(:cfunction, closure, fptr, gcptr, esc(at), esc(rt), QuoteNode(:ccall))
-    if closure
-        cfun = :(let f = $(esc(f.args[1])); let fptr = unsafe_convert(Ptr{eltype(f)}, f); $cfun; end; end)
-    end
-    return cfun
+    cfun = Expr(:cfunction, typ, fptr, at, rt, QuoteNode(:ccall))
+    return esc(cfun)
 end
 
 if ccall(:jl_is_char_signed, Ref{Bool}, ())

@@ -10,6 +10,13 @@
 #include "processor.h"
 #include "julia_assert.h"
 
+#ifndef _OS_WINDOWS_
+#include <sys/mman.h>
+#if defined(_OS_DARWIN_) && !defined(MAP_ANONYMOUS)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#endif
+
 using namespace llvm;
 
 // --- library symbol lookup ---
@@ -99,28 +106,69 @@ jl_value_t *jl_get_JIT(void)
 }
 
 
-static htable_t trampolines;
+static void *trampoline_freelist;
 
-static void trampoline_deleter(jl_value_t *o)
+static void *trampoline_alloc()
 {
-    void **nvals = (void**)ptrhash_get(&trampolines, (void*)o);
-    ptrhash_remove(&trampolines, (void*)o);
-    assert(nvals && nvals != HT_NOTFOUND);
-    free(nvals[0]); // TODO: return to RWX Pool
-    free(nvals);
+    const int sz = 64; // oversized for most platforms. todo: use precise value?
+    if (!trampoline_freelist) {
+#ifdef _OS_WINDOWS_
+        void *mem = VirtualAlloc(NULL, jl_page_size,
+                MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+#else
+        void *mem = mmap(0, jl_page_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#endif
+        void *next = NULL;
+        for (size_t i = 0; i + sz <= jl_page_size; i += sz) {
+            void **curr = (void**)((char*)mem + i);
+            *curr = next;
+            next = (void*)curr;
+        }
+        trampoline_freelist = next;
+    }
+    void *tramp = trampoline_freelist;
+    trampoline_freelist = *(void**)tramp;
+    return tramp;
 }
 
+static void trampoline_free(void *tramp)
+{
+    *(void**)tramp = trampoline_freelist;
+    trampoline_freelist = tramp;
+}
+
+static void trampoline_deleter(void **f)
+{
+    void *tramp = f[0];
+    void *fobj = f[1];
+    void *cache = f[2];
+    void *nval = f[3];
+    f[0] = NULL;
+    f[2] = NULL;
+    f[3] = NULL;
+    if (tramp)
+        trampoline_free(tramp);
+    if (fobj && cache)
+        ptrhash_remove((htable_t*)cache, fobj);
+    if (nval)
+        free(nval);
+}
+
+// TODO: need a thread lock around the cache access parts of this function
 extern "C" JL_DLLEXPORT
-void *jl_get_cfunction_trampoline(
-    htable_t *cache, // weakref htable indexed by (f, vals)
-    jl_value_t *finalizer, // cleanup when this is deleted
-    void *(*init_trampoline)(void *tramp, void **nval),
-    jl_value_t *f,
+jl_value_t *jl_get_cfunction_trampoline(
+    // dynamic inputs:
+    jl_value_t *fobj,
+    jl_datatype_t *result_type,
+    // call-site constants:
+    htable_t *cache, // weakref htable indexed by (fobj, vals)
     jl_svec_t *fill,
+    void *(*init_trampoline)(void *tramp, void **nval),
     jl_unionall_t *env,
     jl_value_t **vals)
 {
-    // lookup (f, vals) in cache
+    // lookup (fobj, vals) in cache
     if (!cache->table)
         htable_new(cache, 1);
     if (fill != jl_emptysvec) {
@@ -131,48 +179,55 @@ void *jl_get_cfunction_trampoline(
             *cache2 = cache;
         }
     }
-    void *tramp = ptrhash_get(cache, (void*)f);
-    if (tramp)
-        return tramp;
+    void *tramp = ptrhash_get(cache, (void*)fobj);
+    if (tramp != HT_NOTFOUND) {
+        assert((jl_datatype_t*)jl_typeof(tramp) == result_type);
+        return (jl_value_t*)tramp;
+    }
 
     // not found, allocate a new one
     size_t n = jl_svec_len(fill);
-    void **nval = (void**)malloc(sizeof(void**) * (n + 2));
-    JL_TRY{
-        nval[1] = (void*)f;
+    void **nval = (void**)malloc(sizeof(void**) * (n + 1));
+    nval[0] = (void*)fobj;
+    jl_value_t *result;
+    JL_TRY {
         for (size_t i = 0; i < n; i++) {
             jl_value_t *sparam_val = jl_instantiate_type_in_env(jl_svecref(fill, i), env, vals);
             if (sparam_val != (jl_value_t*)jl_any_type)
                 if (!jl_is_concrete_type(sparam_val) || !jl_is_immutable(sparam_val))
                     sparam_val = NULL;
-            nval[i + 2] = (void*)sparam_val;
+            nval[i + 1] = (void*)sparam_val;
+        }
+        result = jl_new_struct_uninit(result_type);
+        if (result_type != jl_voidpointer_type) {
+            assert(jl_datatype_size(result_type) == sizeof(void*) * 4);
+            ((void**)result)[1] = (void*)fobj;
+        }
+        int permanent =
+            jl_is_concrete_type(fobj) ||
+            (((jl_datatype_t*)jl_typeof(fobj))->instance == fobj);
+        if (jl_is_unionall(fobj)) {
+            jl_value_t *uw = jl_unwrap_unionall(fobj);
+            if (jl_is_datatype(uw) && ((jl_datatype_t*)uw)->name->wrapper == fobj)
+                permanent = true;
+        }
+        if (!permanent) {
+            void *ptr_finalizer[2] = {
+                    (void*)jl_voidpointer_type,
+                    (void*)&trampoline_deleter
+                };
+            jl_gc_add_finalizer(result, (jl_value_t*)&ptr_finalizer[1]);
+            ((void**)result)[2] = (void*)cache;
+            ((void**)result)[3] = (void*)nval;
         }
     }
     JL_CATCH {
         free(nval);
         jl_rethrow();
     }
-    tramp = malloc(64); // TODO: use RWX pool
-    nval[0] = tramp;
-    tramp = init_trampoline(tramp, nval + 1);
-    ptrhash_put(cache, (void*)f, tramp);
-    int permanent =
-        jl_is_concrete_type(finalizer) ||
-        (((jl_datatype_t*)jl_typeof(finalizer))->instance == finalizer);
-    if (jl_is_unionall(finalizer)) {
-        jl_value_t *uw = jl_unwrap_unionall(finalizer);
-        if (jl_is_datatype(uw) && ((jl_datatype_t*)uw)->name->wrapper == finalizer)
-            permanent = true;
-    }
-    if (!permanent) {
-        if (!trampolines.table)
-            htable_new(&trampolines, 1);
-        ptrhash_put(&trampolines, (void*)finalizer, (void*)nval);
-        void *ptr_finalizer[2] = {
-                (void*)jl_voidpointer_type,
-                (void*)&trampoline_deleter
-            };
-        jl_gc_add_finalizer(finalizer, (jl_value_t*)&ptr_finalizer[1]);
-    }
-    return tramp;
+    tramp = trampoline_alloc();
+    ((void**)result)[0] = tramp;
+    tramp = init_trampoline(tramp, nval);
+    ptrhash_put(cache, (void*)fobj, result);
+    return result;
 }
